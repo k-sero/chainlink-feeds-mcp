@@ -12,6 +12,9 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+warnings.filterwarnings("ignore", message=".*authlib\.jose module is deprecated.*")
+
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.dependencies import get_access_token
@@ -21,8 +24,6 @@ from web3 import Web3
 
 from config import settings
 from shared_auth import enforce_auth_enabled, install_mcp_bearer_auth
-
-warnings.filterwarnings("ignore", message="authlib.jose module is deprecated.*")
 
 
 PRICE_FEED_ABI = [
@@ -394,6 +395,7 @@ def _build_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        base = settings.base_url.rstrip("/").removesuffix("/mcp")
         return {
             "status": "ok",
             "chains": len(FEEDS_DATA.keys()),
@@ -401,6 +403,12 @@ def _build_app() -> FastAPI:
             "infura_api_key_set": bool(settings.infura_api_key),
             "mcp_auth_enabled": _mcp_auth is not None,
             "api_key_auth_enabled": bool((settings.api_key or "").strip()),
+            "oauth_issuer": f"{base}/",
+            "oauth_authorize_url": f"{base}/authorize",
+            "oauth_token_url": f"{base}/token",
+            "oauth_expected_redirect_uri": f"{base}/auth/callback",
+            "google_client_id_configured": bool(settings.google_client_id),
+            "google_client_secret_configured": bool(settings.google_client_secret),
         }
 
     @app.get("/mcp", include_in_schema=False)
