@@ -11,7 +11,6 @@ from typing import Any, Optional
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 
 warnings.filterwarnings("ignore", message=".*authlib\.jose module is deprecated.*")
 
@@ -374,7 +373,7 @@ def _build_app() -> FastAPI:
             base = settings.base_url.rstrip("/").removesuffix("/mcp")
             issuer = base if base.endswith("/") else base + "/"
             return {
-                "resource": f"{base}/mcp",
+                "resource": f"{base}/mcp/",
                 "authorization_servers": [issuer],
                 "scopes_supported": [
                     "openid",
@@ -410,11 +409,6 @@ def _build_app() -> FastAPI:
             "google_client_id_configured": bool(settings.google_client_id),
             "google_client_secret_configured": bool(settings.google_client_secret),
         }
-
-    @app.get("/mcp", include_in_schema=False)
-    @app.post("/mcp", include_in_schema=False)
-    async def mcp_without_trailing_slash_redirect():
-        return RedirectResponse(url="/mcp/", status_code=307)
 
     app.mount("/mcp", raw_mcp_app)
     return app
