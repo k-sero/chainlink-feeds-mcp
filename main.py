@@ -3,19 +3,19 @@ import os
 import sys
 import time
 import warnings
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 warnings.filterwarnings("ignore", message=".*authlib\.jose module is deprecated.*")
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 from fastmcp.server.middleware.timing import TimingMiddleware
@@ -52,27 +52,6 @@ def enforce_auth_enabled(
         f"{service_name}: inbound auth is required outside development. "
         "Configure OAuth and/or API_KEY, or set REQUIRE_AUTH=false explicitly."
     )
-
-
-def install_mcp_bearer_auth(
-    app: FastAPI,
-    api_key: str,
-    path_prefix: str = "/mcp",
-) -> bool:
-    token = (api_key or "").strip()
-    if not token:
-        return False
-    prefix = path_prefix if path_prefix.startswith("/") else f"/{path_prefix}"
-
-    @app.middleware("http")
-    async def _auth_middleware(request: Request, call_next):
-        if request.url.path.startswith(prefix):
-            auth = request.headers.get("Authorization", "")
-            if not auth.startswith("Bearer ") or auth[7:] != token:
-                return Response(status_code=401, content="Unauthorized")
-        return await call_next(request)
-
-    return True
 
 
 PRICE_FEED_ABI = [
@@ -272,11 +251,13 @@ TOOL_CATALOG = {
 
 
 _mcp_auth = None
+_email_restrictions_enabled = False
 _base = settings.base_url.rstrip("/")
 if _base.endswith("/mcp"):
     _base = _base[:-4]
 
 if settings.google_client_id and settings.google_client_secret:
+    _email_restrictions_enabled = True
     _mcp_auth = GoogleProvider(
         client_id=settings.google_client_id,
         client_secret=settings.google_client_secret,
@@ -286,9 +267,11 @@ if settings.google_client_id and settings.google_client_secret:
             "https://www.googleapis.com/auth/userinfo.email",
         ],
     )
+elif (settings.api_key or "").strip():
+    _mcp_auth = StaticTokenVerifier(tokens={settings.api_key.strip(): {"client_id": "claude"}})
 
 enforce_auth_enabled(
-    bool(_mcp_auth) or bool((settings.api_key or "").strip()),
+    bool(_mcp_auth),
     service_name="chainlink-feeds-mcp",
     env_name=settings.env,
     require_auth_value=os.getenv("REQUIRE_AUTH"),
@@ -312,8 +295,42 @@ mcp.add_middleware(
 mcp.add_middleware(TimingMiddleware())
 
 
+@mcp.custom_route("/", methods=["GET"])
+async def root(_: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "chainlink-feeds-mcp",
+            "transport": "streamable-http",
+            "mcp": "/mcp/",
+            "health": "/health",
+        }
+    )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_: Request) -> JSONResponse:
+    base = settings.base_url.rstrip("/").removesuffix("/mcp")
+    return JSONResponse(
+        {
+            "status": "ok",
+            "chains": len(FEEDS_DATA.keys()),
+            "feeds": sum(len(v.get("feeds", [])) for v in FEEDS_DATA.values()),
+            "infura_api_key_set": bool(settings.infura_api_key),
+            "mcp_auth_enabled": _mcp_auth is not None,
+            "api_key_auth_enabled": bool((settings.api_key or "").strip()),
+            "oauth_issuer": f"{base}/",
+            "oauth_authorize_url": f"{base}/authorize",
+            "oauth_token_url": f"{base}/token",
+            "oauth_expected_redirect_uri": f"{base}/auth/callback",
+            "google_client_id_configured": bool(settings.google_client_id),
+            "google_client_secret_configured": bool(settings.google_client_secret),
+        }
+    )
+
+
 def _require_allowed_email() -> Optional[dict[str, str]]:
-    if _mcp_auth is None:
+    if not _email_restrictions_enabled:
         return None
     allowed_domains = {d.strip().lower() for d in settings.allowed_email_domains.split(",") if d.strip()}
     allowed_emails = {e.strip().lower() for e in settings.allowed_emails.split(",") if e.strip()}
@@ -394,74 +411,7 @@ async def query(tool: str, arguments: Optional[dict[str, Any]] = None) -> dict[s
             "message": str(exc),
         }
 
-
-def _build_app() -> FastAPI:
-    raw_mcp_app = mcp.http_app(path="/")
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        async with raw_mcp_app.lifespan(app):
-            yield
-
-    app = FastAPI(
-        title="Chainlink Feeds MCP",
-        description="Chainlink on-chain feed reader via FastMCP meta-tool pattern.",
-        lifespan=lifespan,
-    )
-    app.state.fastmcp_server = mcp
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-    install_mcp_bearer_auth(app, settings.api_key, path_prefix="/mcp")
-
-    if _mcp_auth is not None:
-        for route in _mcp_auth.get_routes():
-            app.routes.insert(0, route)
-
-        @app.get("/.well-known/oauth-protected-resource/mcp", include_in_schema=False)
-        @app.get("/.well-known/oauth-protected-resource/mcp/", include_in_schema=False)
-        async def oauth_protected_resource_metadata_mcp_path():
-            base = settings.base_url.rstrip("/").removesuffix("/mcp")
-            issuer = base if base.endswith("/") else base + "/"
-            return {
-                "resource": f"{base}/mcp/",
-                "authorization_servers": [issuer],
-                "scopes_supported": [
-                    "openid",
-                    "https://www.googleapis.com/auth/userinfo.email",
-                ],
-                "bearer_methods_supported": ["header"],
-            }
-
-    @app.get("/")
-    async def root() -> dict[str, str]:
-        return {
-            "status": "ok",
-            "service": "chainlink-feeds-mcp",
-            "transport": "streamable-http",
-            "mcp": "/mcp/",
-            "health": "/health",
-        }
-
-    @app.get("/health")
-    async def health() -> dict[str, Any]:
-        base = settings.base_url.rstrip("/").removesuffix("/mcp")
-        return {
-            "status": "ok",
-            "chains": len(FEEDS_DATA.keys()),
-            "feeds": sum(len(v.get("feeds", [])) for v in FEEDS_DATA.values()),
-            "infura_api_key_set": bool(settings.infura_api_key),
-            "mcp_auth_enabled": _mcp_auth is not None,
-            "api_key_auth_enabled": bool((settings.api_key or "").strip()),
-            "oauth_issuer": f"{base}/",
-            "oauth_authorize_url": f"{base}/authorize",
-            "oauth_token_url": f"{base}/token",
-            "oauth_expected_redirect_uri": f"{base}/auth/callback",
-            "google_client_id_configured": bool(settings.google_client_id),
-            "google_client_secret_configured": bool(settings.google_client_secret),
-        }
-
-    app.mount("/mcp", raw_mcp_app)
-    return app
+app = mcp.http_app(path="/mcp", stateless_http=settings.fastmcp_stateless_http)
 
 
 def run_stdio_server() -> None:
@@ -469,7 +419,6 @@ def run_stdio_server() -> None:
 
 
 def run_http_server() -> None:
-    app = _build_app()
     uvicorn.run(
         app,
         host=settings.host,
@@ -484,8 +433,6 @@ def main() -> None:
     if "--stdio" in sys.argv:
         run_stdio_server()
     else:
-        if settings.fastmcp_stateless_http:
-            os.environ["FASTMCP_STATELESS_HTTP"] = "true"
         run_http_server()
 
 
