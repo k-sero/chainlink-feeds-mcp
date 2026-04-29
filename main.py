@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 warnings.filterwarnings("ignore", message=".*authlib\.jose module is deprecated.*")
@@ -22,7 +22,57 @@ from fastmcp.server.middleware.timing import TimingMiddleware
 from web3 import Web3
 
 from config import settings
-from shared_auth import enforce_auth_enabled, install_mcp_bearer_auth
+
+
+def _is_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auth_required(env_name: str = "development", require_auth_value: str | None = None) -> bool:
+    raw = (require_auth_value or "").strip()
+    if raw:
+        return _is_truthy(raw)
+    return (env_name or "development").strip().lower() != "development"
+
+
+def enforce_auth_enabled(
+    enabled: bool,
+    *,
+    service_name: str,
+    env_name: str = "development",
+    require_auth_value: str | None = None,
+) -> None:
+    if not _auth_required(env_name=env_name, require_auth_value=require_auth_value):
+        return
+    if enabled:
+        return
+    raise RuntimeError(
+        f"{service_name}: inbound auth is required outside development. "
+        "Configure OAuth and/or API_KEY, or set REQUIRE_AUTH=false explicitly."
+    )
+
+
+def install_mcp_bearer_auth(
+    app: FastAPI,
+    api_key: str,
+    path_prefix: str = "/mcp",
+) -> bool:
+    token = (api_key or "").strip()
+    if not token:
+        return False
+    prefix = path_prefix if path_prefix.startswith("/") else f"/{path_prefix}"
+
+    @app.middleware("http")
+    async def _auth_middleware(request: Request, call_next):
+        if request.url.path.startswith(prefix):
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or auth[7:] != token:
+                return Response(status_code=401, content="Unauthorized")
+        return await call_next(request)
+
+    return True
 
 
 PRICE_FEED_ABI = [
