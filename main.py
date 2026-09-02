@@ -22,6 +22,7 @@ from fastmcp.server.middleware.timing import TimingMiddleware
 from web3 import Web3
 
 from config import settings
+import mcp.types as mcp_types
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -284,6 +285,7 @@ mcp = FastMCP(
         "then query(tool, arguments) to run one operation at a time."
     ),
     auth=_mcp_auth,
+    icons=[mcp_types.Icon(src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjI4IiBmaWxsPSIjMzc1YmQyIi8+PHRleHQgeD0iNjQiIHk9IjY0IiBmb250LWZhbWlseT0iQXJpYWwsSGVsdmV0aWNhLHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iNjQiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiNmZmZmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5DPC90ZXh0Pjwvc3ZnPg==")],
 )
 
 mcp.add_middleware(
