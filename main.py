@@ -251,6 +251,37 @@ TOOL_CATALOG = {
 }
 
 
+def _build_oauth_storage():
+    configured = {
+        "REDIS_URL": bool(settings.redis_url.strip()),
+        "JWT_SIGNING_KEY": bool(settings.jwt_signing_key.strip()),
+        "STORAGE_ENCRYPTION_KEY": bool(settings.storage_encryption_key.strip()),
+    }
+    if not any(configured.values()):
+        if _auth_required(settings.env, os.getenv("REQUIRE_AUTH")):
+            # Without durable storage every redeploy wipes OAuth registrations and forces users to reconnect.
+            raise RuntimeError(
+                "FastMCP OAuth persistence is required outside development: "
+                "set REDIS_URL, JWT_SIGNING_KEY, STORAGE_ENCRYPTION_KEY"
+            )
+        return None
+    missing = [name for name, present in configured.items() if not present]
+    if missing:
+        raise RuntimeError("Incomplete FastMCP OAuth persistence config: set " + ", ".join(missing))
+
+    from cryptography.fernet import Fernet
+    from key_value.aio.stores.redis import RedisStore
+    from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+    from key_value.aio.wrappers.prefix_collections import PrefixCollectionsWrapper
+
+    redis_store = RedisStore(url=settings.redis_url)
+    namespaced_store = PrefixCollectionsWrapper(key_value=redis_store, prefix=settings.oauth_storage_prefix)
+    return FernetEncryptionWrapper(
+        key_value=namespaced_store,
+        fernet=Fernet(settings.storage_encryption_key.encode()),
+    )
+
+
 _mcp_auth = None
 _email_restrictions_enabled = False
 _base = settings.base_url.rstrip("/")
@@ -259,6 +290,10 @@ if _base.endswith("/mcp"):
 
 if settings.google_client_id and settings.google_client_secret:
     _email_restrictions_enabled = True
+    oauth_storage = _build_oauth_storage()
+    oauth_kwargs = {}
+    if oauth_storage is not None:
+        oauth_kwargs = {"jwt_signing_key": settings.jwt_signing_key, "client_storage": oauth_storage}
     _mcp_auth = GoogleProvider(
         client_id=settings.google_client_id,
         client_secret=settings.google_client_secret,
@@ -267,6 +302,7 @@ if settings.google_client_id and settings.google_client_secret:
             "openid",
             "https://www.googleapis.com/auth/userinfo.email",
         ],
+        **oauth_kwargs,
     )
 elif (settings.api_key or "").strip():
     _mcp_auth = StaticTokenVerifier(tokens={settings.api_key.strip(): {"client_id": "claude"}})
