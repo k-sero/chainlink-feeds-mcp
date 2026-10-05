@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     allowed_email_domains: str = ""
     allowed_emails: str = ""
 
+    # Durable FastMCP OAuth storage (required outside development when Google OAuth is on)
+    redis_url: str = ""
+    jwt_signing_key: str = ""
+    storage_encryption_key: str = ""
+    oauth_storage_prefix: str = "chainlink-feeds-mcp"
+
     fastmcp_stateless_http: bool = True
 
     infura_api_key: str = ""
