@@ -367,26 +367,50 @@ async def health(_: Request) -> JSONResponse:
     )
 
 
-def _require_allowed_email() -> Optional[dict[str, str]]:
-    if not _email_restrictions_enabled:
-        return None
+def _caller_claims() -> dict:
+    """Claims of the authenticated MCP caller's access token (empty when unavailable)."""
+    try:
+        return dict(getattr(get_access_token(), "claims", {}) or {})
+    except Exception:
+        return {}
+
+
+def _google_auth_active() -> bool:
+    return bool(_email_restrictions_enabled)
+
+
+def _email_allowlisted(email: str) -> bool:
+    """True when email is in ALLOWED_EMAILS or its exact domain is in ALLOWED_EMAIL_DOMAINS."""
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return False
     allowed_domains = {d.strip().lower() for d in settings.allowed_email_domains.split(",") if d.strip()}
     allowed_emails = {e.strip().lower() for e in settings.allowed_emails.split(",") if e.strip()}
-    if not allowed_domains and not allowed_emails:
+    return email in allowed_emails or email.rsplit("@", 1)[1] in allowed_domains
+
+
+def _allowlist_configured() -> bool:
+    return bool(settings.allowed_email_domains.strip() or settings.allowed_emails.strip())
+
+
+def _require_allowed_email() -> Optional[dict]:
+    """Fail-closed caller email gate layered on top of Google OAuth."""
+    if not _google_auth_active():
         return None
-    token = get_access_token()
-    claims = getattr(token, "claims", {}) or {}
-    email = str(claims.get("email", "")).strip().lower()
+    claims = _caller_claims()
+    email = str(claims.get("email", "") or "").strip().lower()
     if not email:
-        return {"status": "error", "message": "No email in token."}
-    if not claims.get("email_verified"):
-        return {"status": "error", "message": f"Email '{email}' not verified."}
-    if allowed_emails and email not in allowed_emails:
-        return {"status": "error", "message": f"'{email}' is not allowed."}
-    domain = email.split("@")[-1]
-    if allowed_domains and domain not in allowed_domains:
-        return {"status": "error", "message": f"Domain '{domain}' is not allowed."}
-    return None
+        return {"status": "error", "message": "Access denied: no email claim available for MCP caller."}
+    verified = claims.get("email_verified")
+    if not (verified is True or (isinstance(verified, str) and verified.strip().lower() == "true")):
+        return {"status": "error", "message": "Access denied: caller email is not verified."}
+    if not _allowlist_configured():
+        if _is_truthy(os.getenv("ALLOW_ANY_EMAIL")):
+            return None
+        return {"status": "error", "message": "Access denied: ALLOWED_EMAIL_DOMAINS is not configured on this server."}
+    if _email_allowlisted(email):
+        return None
+    return {"status": "error", "message": "Access denied: caller email is not allowed for this server."}
 
 
 @mcp.tool()
