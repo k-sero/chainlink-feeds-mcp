@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 import time
@@ -23,6 +24,17 @@ from web3 import Web3
 
 from config import settings
 import mcp.types as mcp_types
+
+from observability import (
+    AuditLoggingMiddleware,
+    attach_lifespan,
+    install_log_handler,
+    observability_status,
+)
+
+logger = logging.getLogger("chainlink-feeds-mcp")
+# Mirror app logs into `mcp-logs` (no-op without AXIOM_TOKEN).
+install_log_handler(logger)
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -363,6 +375,7 @@ async def health(_: Request) -> JSONResponse:
             "oauth_expected_redirect_uri": f"{base}/auth/callback",
             "google_client_id_configured": bool(settings.google_client_id),
             "google_client_secret_configured": bool(settings.google_client_secret),
+            "observability": observability_status(),
         }
     )
 
@@ -473,7 +486,11 @@ async def query(tool: str, arguments: Optional[dict[str, Any]] = None) -> dict[s
             "message": str(exc),
         }
 
+# ── audit log — one structured event per tool call, stderr + Axiom ──
+mcp.add_middleware(AuditLoggingMiddleware(arg_allowlist={"chain", "pair"}))
+
 app = mcp.http_app(path="/mcp", stateless_http=settings.fastmcp_stateless_http)
+attach_lifespan(app)
 
 
 def run_stdio_server() -> None:
